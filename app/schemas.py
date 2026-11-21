@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 
@@ -37,6 +39,7 @@ class Competitor(StrictModel):
     description: str = Field(min_length=1)
     products_and_services: list[str] = Field(min_length=1)
     strengths: list[str] = Field(min_length=1)
+    competitive_advantages: list[str] = Field(default_factory=list)
     weaknesses: list[str] = Field(min_length=1)
     comparison_with_analyzed_business: str = Field(min_length=1)
 
@@ -180,3 +183,13 @@ class WebsiteAnalysisResponse(StrictModel):
     extracted_data: ExtractedWebsiteData
     sources: AnalysisSources
     analysis: WebsiteAnalysis
+    competitor_analysis_status: Literal[
+        "complete",
+        "incomplete",
+        "insufficient_search_results",
+        "search_failed",
+        "analysis_failed",
+    ] = "insufficient_search_results"
+    competitor_analysis_message: str = (
+        "We could not identify reliable competitors from the available search results."
+    )

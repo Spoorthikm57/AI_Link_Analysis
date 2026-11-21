@@ -42,22 +42,24 @@ private-network targets, and collects page title/description, Open Graph metadat
 headings, and readable server-rendered text. It removes common page boilerplate and
 caps the downloaded HTML and extracted text.
 
-The backend uses the Tavily Python SDK to improve competitor discovery. When direct
-website extraction succeeds, it makes one focused discovery search; if extraction
-fails or returns too little content, it runs six broader company searches instead.
-After Groq identifies up to two potential competitors, Tavily makes two combined
-research searches per competitor (official website/products/features, then strengths,
-weaknesses, and comparison). This caps Tavily at five searches for a directly
-extractable site or ten when extraction needs the broader fallback. Results are
-deduplicated and bounded before being passed to Groq. Competitor and SWOT fields are
-required by response validation; incomplete generations receive a correction attempt.
-Verified source information is distinguished from analysis, which is labeled
-`AI-generated inference`. Reports include the collected references in the response's
-`sources` object and the dashboard. LinkedIn login, CAPTCHA, and other access
-restrictions are not bypassed; only publicly indexed information is searched. A
-directly extractable site can still be analyzed if optional Tavily discovery is
-unavailable; when extraction fails, Tavily results are required to avoid generating
-an unsupported report.
+The backend uses the Tavily Python SDK for general company research and a separate,
+dedicated competitor-discovery stage. Once Groq has identified the business category,
+products/services, and audience, competitor discovery searches for the business's
+competitors, alternatives, similar industry companies, and providers serving the same
+audience. Search results are deduplicated and screened to remove the analyzed business,
+social profiles, and obvious editorial pages. Groq receives the extracted competitor
+candidates and business context, not just the raw discovery results. If fewer than
+three competitors are validated, up to two additional rounds use alternative queries.
+The response reports whether competitor analysis is complete, incomplete, unavailable
+due to insufficient results, or affected by a search/AI failure, with a user-facing
+explanation. Competitor and SWOT sections are validated; incomplete AI generations
+receive correction attempts. Verified source information is distinguished from
+analysis, which is labeled `AI-generated inference`. Reports include collected
+references in the response's `sources` object and the dashboard. LinkedIn login,
+CAPTCHA, and other access restrictions are not bypassed; only publicly indexed
+information is searched. A directly extractable site can still be analyzed if optional
+general Tavily discovery is unavailable; when extraction fails, Tavily results are
+required to avoid generating an unsupported report.
 
 Run the focused backend tests with:
 

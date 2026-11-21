@@ -7,6 +7,113 @@ from app.services import search_service
 
 
 class SearchServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_competitor_discovery_runs_multiple_targeted_queries(self):
+        client = AsyncMock()
+        client.search.return_value = {
+            "results": [
+                {
+                    "title": "Related company",
+                    "url": "https://related.example/about",
+                    "content": "A comparable public company.",
+                    "score": 0.8,
+                }
+            ]
+        }
+
+        with (
+            patch.object(search_service, "TAVILY_API_KEY", "test-key"),
+            patch.object(search_service, "_client", client),
+        ):
+            result = await search_service.search_competitor_discovery(
+                "https://example.com",
+                "Example",
+                "Business software",
+            )
+
+        queries = [
+            call.kwargs["query"]
+            for call in client.search.await_args_list
+        ]
+        self.assertTrue(result["success"])
+        self.assertIn("Example competitors", queries)
+        self.assertIn("Business software alternatives", queries)
+        self.assertIn("Example vs alternatives", queries)
+        self.assertIn("Best alternatives to Example", queries)
+        self.assertIn("Companies offering Business software", queries)
+        self.assertIn("Business software companies similar to Example", queries)
+
+    async def test_competitor_search_uses_different_repair_queries(self):
+        initial = search_service.build_competitor_search_queries(
+            "Example",
+            "Business software",
+            ["Planning tools"],
+            "Small businesses",
+        )
+        repair = search_service.build_competitor_search_queries(
+            "Example",
+            "Business software",
+            ["Planning tools"],
+            "Small businesses",
+            repair_attempt=1,
+        )
+
+        self.assertEqual(len(initial), 7)
+        self.assertEqual(len(repair), 3)
+        self.assertFalse(set(initial) & set(repair))
+        self.assertTrue(any("Small businesses" in query for query in repair))
+
+    async def test_processes_competitors_and_filters_self_articles_and_social_results(self):
+        results = [
+            {
+                "title": "Northstar | Business planning",
+                "url": "https://northstar.example/products",
+                "content": "Northstar provides planning software for small businesses.",
+                "query": "Business software companies similar to Acme",
+            },
+            {
+                "title": "Northstar | Business planning",
+                "url": "https://www.northstar.example/about",
+                "content": "Northstar provides software and consulting services.",
+                "query": "Acme competitors",
+            },
+            {
+                "title": "Acme | Official website",
+                "url": "https://acme.example/about",
+                "content": "The analyzed company.",
+                "query": "Acme competitors",
+            },
+            {
+                "title": "Best competitors this year",
+                "url": "https://publisher.example/news/competitors",
+                "content": "A news story about competing companies.",
+                "query": "Acme competitors",
+            },
+            {
+                "title": "Northstar profile",
+                "url": "https://www.linkedin.com/company/northstar",
+                "content": "Company profile.",
+                "query": "Acme competitors",
+            },
+            {
+                "title": "Brightline | Services",
+                "url": "https://brightline.example/blog/services",
+                "content": "A blog post.",
+                "query": "Acme competitors",
+            },
+        ]
+
+        candidates = search_service.process_competitor_search_results(
+            results,
+            "https://acme.example",
+            "Acme",
+            "Business software",
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["name"], "Northstar")
+        self.assertEqual(candidates[0]["website"], "https://northstar.example")
+        self.assertTrue(candidates[0]["products_services"])
+
     async def test_builds_company_queries_from_linkedin_company_slug(self):
         queries = search_service.build_company_search_queries(
             "https://www.linkedin.com/company/acme-industries-1234/"

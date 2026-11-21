@@ -49,7 +49,13 @@ export default function Dashboard({ result, onAnalyzeAnother }) {
   let content;
   switch (activeSection) {
     case "competitors":
-      content = <Competitors competitors={analysis.competitor_analysis} />;
+      content = (
+        <Competitors
+          competitors={analysis.competitor_analysis}
+          status={result.competitor_analysis_status}
+          message={result.competitor_analysis_message}
+        />
+      );
       break;
     case "queries":
       content = <SearchQueries queries={analysis.search_queries} />;

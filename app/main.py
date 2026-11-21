@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.schemas import WebsiteAnalysisRequest, WebsiteAnalysisResponse
+from app.services.competitor_service import discover_competitors
 from app.services.llm_service import (
     analyze_website_with_ai,
     build_partial_analysis,
@@ -16,8 +17,6 @@ from app.services.llm_service import (
 from app.services.search_service import (
     close_search_client,
     search_company_information,
-    search_competitor_discovery,
-    search_competitor_information,
 )
 from app.services.website_extractor import extract_website_content
 
@@ -216,104 +215,36 @@ async def analyze_website(request: WebsiteAnalysisRequest):
             ),
         )
 
-    competitors = ai_result["analysis"].get("competitor_analysis", [])
-    business_overview = ai_result["analysis"].get("business_overview", {})
-    business_name = (
-        business_overview.get("business_name")
-        or website_data.get("title")
-        or hostname
-    )
-    business_category = business_overview.get("business_category") or ""
+    try:
+        competitor_result = await discover_competitors(
+            website_url,
+            ai_result["analysis"],
+            website_data,
+        )
+    except Exception:
+        logger.exception(
+            "[COMPETITOR] Unexpected competitor analysis failure: host=%s",
+            hostname,
+        )
+        competitor_result = {
+            "competitors": [],
+            "status": "search_failed",
+            "message": (
+                "Competitor discovery could not be completed because of an "
+                "unexpected service error. Please retry."
+            ),
+            "search_results": [],
+            "search_succeeded": False,
+        }
 
-    if tavily_search_used and len(competitors) < 3:
-        try:
-            discovery = await search_competitor_discovery(
-                website_url,
-                str(business_name),
-                str(business_category),
-            )
-        except Exception:
-            logger.exception(
-                "Tavily competitor discovery failed: host=%s",
-                hostname,
-            )
-        else:
-            discovery_results = (
-                discovery.get("results", []) if discovery.get("success") else []
-            )
-            if discovery_results:
-                known_urls = {item.get("url") for item in search_results}
-                for item in discovery_results:
-                    result_url = item.get("url")
-                    if result_url not in known_urls:
-                        search_results.append(item)
-                        known_urls.add(result_url)
-                ai_input["search_results"] = search_results
-                try:
-                    discovery_result = await analyze_website_with_ai(ai_input)
-                except Exception:
-                    logger.exception(
-                        "Analysis rerun with competitor discovery evidence failed: host=%s",
-                        hostname,
-                    )
-                else:
-                    if discovery_result.get("success"):
-                        ai_result = discovery_result
-                        competitors = ai_result["analysis"].get("competitor_analysis", [])
-                    else:
-                        logger.warning(
-                            "Could not rerun analysis with competitor discovery evidence: host=%s code=%s",
-                            hostname,
-                            discovery_result.get("error_code"),
-                        )
-
-    if tavily_search_used and competitors:
-        try:
-            competitor_search = await search_competitor_information(
-                competitors,
-                str(business_name),
-            )
-        except Exception:
-            logger.exception(
-                "Tavily competitor research failed: host=%s",
-                hostname,
-            )
-        else:
-            competitor_results = (
-                competitor_search.get("results", [])
-                if competitor_search.get("success")
-                else []
-            )
-            if competitor_results:
-                known_urls = {item.get("url") for item in search_results}
-                for item in competitor_results:
-                    result_url = item.get("url")
-                    if result_url not in known_urls:
-                        search_results.append(item)
-                        known_urls.add(result_url)
-                ai_input["search_results"] = search_results
-                try:
-                    enriched_result = await analyze_website_with_ai(ai_input)
-                except Exception:
-                    logger.exception(
-                        "Analysis regeneration with competitor evidence failed: host=%s",
-                        hostname,
-                    )
-                else:
-                    if enriched_result.get("success"):
-                        ai_result = enriched_result
-                    else:
-                        logger.warning(
-                            "Could not regenerate analysis with competitor evidence: host=%s code=%s",
-                            hostname,
-                            enriched_result.get("error_code"),
-                        )
-            else:
-                logger.info(
-                    "No competitor search results available: host=%s code=%s",
-                    hostname,
-                    competitor_search.get("error_code"),
-                )
+    ai_result["analysis"]["competitor_analysis"] = competitor_result["competitors"]
+    known_urls = {item.get("url") for item in search_results if isinstance(item, dict)}
+    for item in competitor_result["search_results"]:
+        result_url = item.get("url")
+        if result_url and result_url not in known_urls:
+            search_results.append(item)
+            known_urls.add(result_url)
+    tavily_search_used = tavily_search_used or competitor_result["search_succeeded"]
 
     return {
         "success": True,
@@ -348,4 +279,6 @@ async def analyze_website(request: WebsiteAnalysisRequest):
             "search_results": search_results,
         },
         "analysis": ai_result["analysis"],
+        "competitor_analysis_status": competitor_result["status"],
+        "competitor_analysis_message": competitor_result["message"],
     }

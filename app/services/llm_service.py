@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 from typing import Any
 from urllib.parse import urlsplit
@@ -15,8 +16,10 @@ from groq import (
 from pydantic import ValidationError
 
 from app.config import GROQ_API_KEY, GROQ_MODEL, GROQ_TIMEOUT_SECONDS
-from app.schemas import WebsiteAnalysis
+from app.schemas import Competitor, WebsiteAnalysis
 from app.utils.validators import validate_analysis_completeness
+
+logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 3
 MAX_CONTENT_CHARACTERS = 6_000
@@ -136,7 +139,7 @@ async def _create_completion(website_data: dict[str, Any]) -> Any:
                 messages=messages,
                 response_format={"type": "json_object"},
                 temperature=0.2,
-                max_completion_tokens=6_000,
+                max_completion_tokens=8_000,
             )
         except RETRYABLE_ERRORS:
             if attempt == MAX_ATTEMPTS - 1:
@@ -314,6 +317,10 @@ def _normalize_analysis_payload(
                         competitor.get("products_and_services")
                     ),
                     "strengths": _string_list(competitor.get("strengths")),
+                    "competitive_advantages": _string_list(
+                        competitor.get("competitive_advantages")
+                        or competitor.get("strengths")
+                    ),
                     "weaknesses": _string_list(competitor.get("weaknesses")),
                     "comparison_with_analyzed_business": _text_or_explanation(
                         competitor.get("comparison_with_analyzed_business")
@@ -530,13 +537,179 @@ async def _create_correction_completion(
                 messages=messages,
                 response_format={"type": "json_object"},
                 temperature=0.1,
-                max_completion_tokens=6_000,
+                max_completion_tokens=8_000,
             )
         except RETRYABLE_ERRORS:
             if attempt == MAX_ATTEMPTS - 1:
                 raise
             await asyncio.sleep(2**attempt)
     raise RuntimeError("Groq correction attempts exhausted.")
+
+
+async def _create_competitor_completion(competitor_data: dict[str, Any]) -> Any:
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Identify competitors only from the supplied Tavily candidate records. "
+                "Do not invent company names, URLs, products, or claims. Return one JSON "
+                "object with a competitors array. Each object must contain name, website, "
+                "description, products_services, competitive_advantages, weaknesses, and "
+                "comparison. Use the exact candidate website URL. Label reasonable "
+                "comparative judgments with 'AI-generated inference:'."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(competitor_data, ensure_ascii=False),
+        },
+    ]
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            return await client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                response_format={"type": "json_object"},
+                temperature=0.1,
+                max_completion_tokens=4_000,
+            )
+        except RETRYABLE_ERRORS:
+            if attempt == MAX_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(2**attempt)
+    raise RuntimeError("Groq competitor-analysis attempts exhausted.")
+
+
+async def generate_competitor_analysis(
+    business_information: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not candidates:
+        return {"success": True, "competitors": []}
+
+    try:
+        response = await _create_competitor_completion(
+            {
+                "analyzed_business": business_information,
+                "competitor_candidates": candidates[:15],
+            }
+        )
+    except RETRYABLE_ERRORS as error:
+        logger.warning(
+            "[COMPETITOR] Groq competitor generation failed: error_type=%s",
+            type(error).__name__,
+        )
+        return {
+            "success": False,
+            "error_code": "groq_unavailable",
+            "competitors": [],
+        }
+    except APIStatusError as error:
+        logger.warning(
+            "[COMPETITOR] Groq competitor generation failed: status=%s",
+            error.status_code,
+        )
+        return {
+            "success": False,
+            "error_code": "groq_api_error",
+            "competitors": [],
+        }
+
+    if not response.choices:
+        return {
+            "success": False,
+            "error_code": "invalid_response",
+            "competitors": [],
+        }
+
+    content = response.choices[0].message.content
+    if not isinstance(content, str) or not content.strip():
+        return {
+            "success": False,
+            "error_code": "invalid_response",
+            "competitors": [],
+        }
+
+    try:
+        payload = _extract_json_content(content)
+    except json.JSONDecodeError:
+        return {
+            "success": False,
+            "error_code": "invalid_response",
+            "competitors": [],
+        }
+    raw_competitors = (
+        payload.get("competitors") if isinstance(payload, dict) else None
+    )
+    if not isinstance(raw_competitors, list):
+        return {
+            "success": False,
+            "error_code": "invalid_response",
+            "competitors": [],
+        }
+
+    candidates_by_host = {
+        (urlsplit(str(candidate.get("website", ""))).hostname or "").lower().removeprefix("www."): candidate
+        for candidate in candidates
+        if candidate.get("website")
+    }
+    candidates_by_name = {
+        re.sub(r"[^a-z0-9]+", "", str(candidate.get("name", "")).lower()): candidate
+        for candidate in candidates
+    }
+    normalized_competitors = []
+    seen_hosts = set()
+    for item in raw_competitors:
+        if not isinstance(item, dict):
+            continue
+        response_name = item.get("name") or item.get("competitor_name")
+        response_website = item.get("website") or item.get("competitor_website")
+        host = (
+            (urlsplit(str(response_website)).hostname or "").lower().removeprefix("www.")
+            if response_website
+            else ""
+        )
+        name_key = re.sub(r"[^a-z0-9]+", "", str(response_name or "").lower())
+        candidate = candidates_by_host.get(host) or candidates_by_name.get(name_key)
+        if candidate is None:
+            continue
+        candidate_host = (
+            urlsplit(str(candidate.get("website", ""))).hostname or ""
+        ).lower().removeprefix("www.")
+        if candidate_host in seen_hosts:
+            continue
+
+        advantages = _string_list(
+            item.get("competitive_advantages") or item.get("strengths")
+        )
+        if advantages == [INSUFFICIENT_INFORMATION]:
+            advantages = _string_list(candidate.get("products_services"))
+        raw_competitor = {
+            "competitor_name": str(candidate.get("name", "")).strip(),
+            "competitor_website": str(candidate.get("website", "")).strip(),
+            "description": _text_or_explanation(
+                item.get("description") or candidate.get("description")
+            ),
+            "products_and_services": _string_list(
+                item.get("products_services") or candidate.get("products_services")
+            ),
+            "strengths": advantages,
+            "competitive_advantages": advantages,
+            "weaknesses": _string_list(item.get("weaknesses")),
+            "comparison_with_analyzed_business": _text_or_explanation(
+                item.get("comparison")
+                or item.get("comparison_with_analyzed_business")
+                or candidate.get("similarity")
+            ),
+        }
+        try:
+            normalized = Competitor.model_validate(raw_competitor).model_dump()
+        except ValidationError:
+            continue
+        normalized_competitors.append(normalized)
+        seen_hosts.add(candidate_host)
+
+    return {"success": True, "competitors": normalized_competitors[:5]}
 
 
 def _groq_partial_result(
@@ -663,10 +836,7 @@ async def analyze_website_with_ai(website_data: dict[str, Any]) -> dict[str, Any
                             )
                         analysis = WebsiteAnalysis.model_validate(normalized_payload)
                         current_analysis = analysis.model_dump()
-                        missing_sections = validate_analysis_completeness(
-                            current_analysis,
-                            sufficient_evidence=has_direct_content or has_search_results,
-                        )
+                        missing_sections = validate_analysis_completeness(current_analysis)
                         if not missing_sections:
                             return {
                                 "success": True,
@@ -693,7 +863,6 @@ async def analyze_website_with_ai(website_data: dict[str, Any]) -> dict[str, Any
             missing_sections = (
                 validate_analysis_completeness(
                     current_analysis or {},
-                    sufficient_evidence=has_direct_content or has_search_results,
                 )
                 if current_analysis is not None
                 else {}

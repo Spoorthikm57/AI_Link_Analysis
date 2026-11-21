@@ -30,8 +30,6 @@ def _meaningful_list(value: Any) -> bool:
 
 def validate_analysis_completeness(
     analysis: dict[str, Any],
-    *,
-    sufficient_evidence: bool = True,
 ) -> dict[str, list[str]]:
     missing: dict[str, list[str]] = {}
 
@@ -58,28 +56,28 @@ def validate_analysis_completeness(
         missing["business_overview"] = business_missing
 
     competitors = analysis.get("competitor_analysis")
-    competitors = competitors if isinstance(competitors, list) else []
+    competitors_are_list = isinstance(competitors, list)
+    competitors = competitors if competitors_are_list else []
     competitor_missing = []
-    if sufficient_evidence:
-        if len(competitors) < 3:
-            competitor_missing.append("at least 3 relevant competitors")
-        required_competitor_fields = [
-            "competitor_name",
-            "competitor_website",
-            "description",
-            "strengths",
-            "weaknesses",
-            "comparison_with_analyzed_business",
-        ]
-        for index, competitor in enumerate(competitors[:5]):
-            if not isinstance(competitor, dict):
-                competitor_missing.append(f"competitor_{index + 1}")
-                continue
-            for field in required_competitor_fields:
-                value = competitor.get(field)
-                complete = _meaningful_list(value) if field in {"strengths", "weaknesses"} else _meaningful_text(value)
-                if not complete:
-                    competitor_missing.append(f"competitor_{index + 1}.{field}")
+    if not competitors_are_list or len(competitors) < 3:
+        competitor_missing.append("at least 3 relevant competitors")
+    required_competitor_fields = [
+        "competitor_name",
+        "competitor_website",
+        "description",
+        "strengths",
+        "weaknesses",
+        "comparison_with_analyzed_business",
+    ]
+    for index, competitor in enumerate(competitors[:5]):
+        if not isinstance(competitor, dict):
+            competitor_missing.append(f"competitor_{index + 1}")
+            continue
+        for field in required_competitor_fields:
+            value = competitor.get(field)
+            complete = _meaningful_list(value) if field in {"strengths", "weaknesses"} else _meaningful_text(value)
+            if not complete:
+                competitor_missing.append(f"competitor_{index + 1}.{field}")
     if competitor_missing:
         missing["competitor_analysis"] = competitor_missing
 

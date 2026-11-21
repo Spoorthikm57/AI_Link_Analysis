@@ -7,6 +7,17 @@ import httpx
 
 from app import main, schemas
 from app.services import llm_service
+from app.utils.validators import validate_analysis_completeness
+
+
+def no_competitor_result() -> dict:
+    return {
+        "competitors": [],
+        "status": "insufficient_search_results",
+        "message": "No reliable competitors were found.",
+        "search_results": [],
+        "search_succeeded": False,
+    }
 
 
 def valid_analysis_payload() -> dict:
@@ -98,6 +109,75 @@ def valid_analysis_payload() -> dict:
 
 
 class LLMServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_validator_rejects_missing_competitor_array(self) -> None:
+        missing = validate_analysis_completeness({"competitor_analysis": None})
+
+        self.assertIn("competitor_analysis", missing)
+        self.assertIn("at least 3 relevant competitors", missing["competitor_analysis"])
+
+    async def test_generates_competitors_only_from_discovered_candidates(self) -> None:
+        candidate = {
+            "name": "Northstar",
+            "website": "https://northstar.example",
+            "description": "Planning software for small businesses.",
+            "products_services": ["Planning software"],
+            "similarity": "Targets the same business audience.",
+        }
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {
+                                "competitors": [
+                                    {
+                                        "name": "Northstar",
+                                        "website": "https://northstar.example",
+                                        "description": "Planning software for small businesses.",
+                                        "products_services": ["Planning software"],
+                                        "competitive_advantages": ["Flexible planning tools"],
+                                        "weaknesses": ["Smaller market presence"],
+                                        "comparison": "AI-generated inference: serves a similar audience.",
+                                    },
+                                    {
+                                        "name": "Unsupported company",
+                                        "website": "https://unsupported.example",
+                                        "description": "Not in the evidence.",
+                                        "products_services": ["Unknown"],
+                                        "competitive_advantages": ["Unknown"],
+                                        "weaknesses": ["Unknown"],
+                                        "comparison": "Unsupported.",
+                                    },
+                                ]
+                            }
+                        )
+                    )
+                )
+            ]
+        )
+
+        with patch.object(
+            llm_service,
+            "_create_competitor_completion",
+            new=AsyncMock(return_value=response),
+        ) as create:
+            result = await llm_service.generate_competitor_analysis(
+                {"business_name": "Acme"},
+                [candidate],
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(len(result["competitors"]), 1)
+        self.assertEqual(result["competitors"][0]["competitor_name"], "Northstar")
+        self.assertEqual(
+            result["competitors"][0]["competitive_advantages"],
+            ["Flexible planning tools"],
+        )
+        self.assertEqual(
+            create.await_args.args[0]["competitor_candidates"],
+            [candidate],
+        )
+
     async def test_accepts_complete_structured_analysis(self) -> None:
         content = json.dumps(valid_analysis_payload())
         response = SimpleNamespace(
@@ -297,6 +377,11 @@ class AnalysisEndpointTests(unittest.IsolatedAsyncioTestCase):
             patch.object(main, "analyze_website_with_ai", new=analyze_website),
             patch.object(
                 main,
+                "discover_competitors",
+                new=AsyncMock(return_value=no_competitor_result()),
+            ),
+            patch.object(
+                main,
                 "search_company_information",
                 new=AsyncMock(
                     return_value={"success": False, "error_code": "not_configured"}
@@ -352,10 +437,8 @@ class AnalysisEndpointTests(unittest.IsolatedAsyncioTestCase):
             ) as search,
             patch.object(
                 main,
-                "search_competitor_information",
-                new=AsyncMock(
-                    return_value={"success": False, "error_code": "no_results"}
-                ),
+                "discover_competitors",
+                new=AsyncMock(return_value=no_competitor_result()),
             ),
             patch.object(
                 main,
@@ -381,7 +464,7 @@ class AnalysisEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(analyze.await_args.args[0]["search_results"], search_results)
         search.assert_awaited_once()
 
-    async def test_enriches_competitors_and_regenerates_analysis_with_search_evidence(self) -> None:
+    async def test_uses_dedicated_competitor_results_and_returns_status(self) -> None:
         website_data = {
             "success": True,
             "url": "https://example.com",
@@ -422,20 +505,21 @@ class AnalysisEndpointTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 main,
-                "search_competitor_information",
+                "discover_competitors",
                 new=AsyncMock(
-                    return_value={"success": True, "results": competitor_results}
+                    return_value={
+                        "competitors": analysis.model_dump()["competitor_analysis"],
+                        "status": "complete",
+                        "message": "Found and analyzed 3 competitors.",
+                        "search_results": competitor_results,
+                        "search_succeeded": True,
+                    }
                 ),
-            ) as competitor_search,
+            ) as competitor_discovery,
             patch.object(
                 main,
                 "analyze_website_with_ai",
-                new=AsyncMock(
-                    side_effect=[
-                        {"success": True, "analysis": analysis.model_dump()},
-                        {"success": True, "analysis": analysis.model_dump()},
-                    ]
-                ),
+                new=AsyncMock(return_value={"success": True, "analysis": analysis.model_dump()}),
             ) as analyze,
         ):
             async with httpx.AsyncClient(
@@ -448,19 +532,14 @@ class AnalysisEndpointTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(analyze.await_count, 2)
-        self.assertEqual(
-            analyze.await_args_list[1].args[0]["search_results"],
-            discovery_results + competitor_results,
-        )
+        analyze.assert_awaited_once()
+        competitor_discovery.assert_awaited_once()
         self.assertEqual(
             response.json()["sources"]["search_results"],
             discovery_results + competitor_results,
         )
-        self.assertEqual(
-            competitor_search.await_args.args[1],
-            "Example",
-        )
+        self.assertEqual(response.json()["competitor_analysis_status"], "complete")
+        self.assertEqual(len(response.json()["analysis"]["competitor_analysis"]), 3)
 
     async def test_reports_tavily_failure_without_calling_groq(self) -> None:
         async with httpx.AsyncClient(
@@ -489,6 +568,11 @@ class AnalysisEndpointTests(unittest.IsolatedAsyncioTestCase):
                             "error": "Tavily API failed.",
                         }
                     ),
+                ),
+                patch.object(
+                    main,
+                    "discover_competitors",
+                    new=AsyncMock(return_value=no_competitor_result()),
                 ),
                 patch.object(main, "analyze_website_with_ai", new=AsyncMock()) as analyze,
             ):
@@ -555,6 +639,11 @@ class AnalysisEndpointTests(unittest.IsolatedAsyncioTestCase):
                     }
                 ),
             ),
+            patch.object(
+                main,
+                "discover_competitors",
+                new=AsyncMock(return_value=no_competitor_result()),
+            ) as discover,
             patch.object(main, "analyze_website_with_ai", new=AsyncMock()) as analyze,
         ):
             async with httpx.AsyncClient(
@@ -569,6 +658,11 @@ class AnalysisEndpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["success"])
         self.assertTrue(response.json()["analysis"])
+        self.assertEqual(
+            response.json()["competitor_analysis_status"],
+            "insufficient_search_results",
+        )
+        discover.assert_awaited_once()
         analyze.assert_not_awaited()
 
     async def test_returns_friendly_message_for_incomplete_ai_response(self) -> None:

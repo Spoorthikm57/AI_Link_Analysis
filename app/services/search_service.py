@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 MAX_RESULTS = 8
 MAX_SNIPPET_CHARACTERS = 1_200
 MAX_COMPETITORS_TO_ENRICH = 2
+MAX_COMPETITOR_DISCOVERY_RESULTS = 21
 SEARCH_QUERIES_PER_REQUEST = (
     "{company} company overview",
     "{company} products and services",
@@ -32,6 +33,52 @@ SEARCH_QUERIES_PER_REQUEST = (
 COMPETITOR_SEARCH_QUERIES = (
     "{competitor} official website products and services features",
     "{competitor} strengths weaknesses vs {company}",
+)
+SOCIAL_MEDIA_DOMAINS = (
+    "facebook.com",
+    "instagram.com",
+    "linkedin.com",
+    "tiktok.com",
+    "twitter.com",
+    "x.com",
+    "youtube.com",
+)
+EDITORIAL_DOMAINS = (
+    "bbc.com",
+    "bbc.co.uk",
+    "capterra.com",
+    "cnn.com",
+    "crunchbase.com",
+    "forbes.com",
+    "nytimes.com",
+    "g2.com",
+    "medium.com",
+    "reuters.com",
+    "theverge.com",
+    "techcrunch.com",
+    "theguardian.com",
+    "wikipedia.org",
+)
+EDITORIAL_PATH_PARTS = (
+    "/article",
+    "/blog",
+    "/news",
+    "/press",
+    "/review",
+    "/stories",
+)
+EDITORIAL_TITLE_TERMS = (
+    "alternatives to",
+    "best alternatives",
+    "best website",
+    "competitors of",
+    "company news",
+    "how to",
+    "press release",
+    "top 10",
+    "top alternatives",
+    "tutorial",
+    "vs.",
 )
 
 _client: AsyncTavilyClient | None = None
@@ -71,6 +118,160 @@ def build_company_search_queries(
 ) -> list[str]:
     company = _company_name_from_url(url, extracted_data or {})
     return [template.format(company=company) for template in SEARCH_QUERIES_PER_REQUEST]
+
+
+def build_competitor_search_queries(
+    company: str,
+    category: str = "",
+    products_and_services: list[str] | None = None,
+    target_audience: str = "",
+    repair_attempt: int = 0,
+) -> list[str]:
+    company = company.strip()[:120] or "the analyzed business"
+    category = category.strip()[:120] or "related industry"
+    offerings = ", ".join(
+        item.strip()[:100]
+        for item in (products_and_services or [])
+        if isinstance(item, str) and item.strip()
+    )[:240] or category
+    audience = target_audience.strip()[:120] or "similar customers"
+
+    if repair_attempt == 0:
+        queries = [
+            f"{company} competitors",
+            f"Best alternatives to {company}",
+            f"{category} alternatives",
+            f"{company} vs alternatives",
+            f"Companies offering {offerings}",
+            f"{category} companies similar to {company}",
+            f"{company} alternatives in {category}",
+        ]
+    elif repair_attempt == 1:
+        queries = [
+            f"{offerings} providers serving {audience}",
+            f"leading {category} providers like {company}",
+            f"{company} competitor official websites",
+        ]
+    else:
+        queries = [
+            f"{category} solutions for {audience}",
+            f"businesses competing with {company} in {category}",
+            f"{offerings} companies for {audience}",
+        ]
+    return list(dict.fromkeys(query[:300] for query in queries))
+
+
+def _host_is_under(host: str, domains: tuple[str, ...]) -> bool:
+    return any(host == domain or host.endswith(f".{domain}") for domain in domains)
+
+
+def _competitor_name_from_result(title: str, hostname: str) -> str:
+    name = re.split(r"\s*[|–—:]\s*|\s+-\s+", title.strip(), maxsplit=1)[0].strip()
+    name = re.sub(
+        r"\s+(official (website|site|products?|services?|features?)|"
+        r"products and services|homepage|home page|home)$",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    ).strip(" -|:")
+    if not name or name.lower() in {"home", "welcome", "official website"}:
+        labels = hostname.lower().removeprefix("www.").split(".")
+        if len(labels) >= 3 and labels[-2] in {"ac", "co", "com", "gov", "net", "org"}:
+            name = labels[-3]
+        elif len(labels) >= 2:
+            name = labels[-2]
+        else:
+            name = labels[0]
+        name = re.sub(r"[-_]+", " ", name).title()
+    return name[:120]
+
+
+def _is_editorial_result(title: str, url: str, hostname: str) -> bool:
+    lowered_title = title.lower()
+    lowered_path = urlsplit(url).path.lower()
+    return (
+        _host_is_under(hostname, EDITORIAL_DOMAINS)
+        or any(part in lowered_path for part in EDITORIAL_PATH_PARTS)
+        or any(term in lowered_title for term in EDITORIAL_TITLE_TERMS)
+    )
+
+
+def process_competitor_search_results(
+    results: list[dict[str, Any]],
+    analyzed_url: str,
+    analyzed_company: str,
+    business_category: str = "",
+) -> list[dict[str, Any]]:
+    analyzed_host = (
+        (urlsplit(analyzed_url).hostname or "").lower().removeprefix("www.")
+    )
+    analyzed_name = re.sub(
+        r"[^a-z0-9]+", "", analyzed_company.lower()
+    )
+    candidates_by_host: dict[str, dict[str, Any]] = {}
+    seen_names: set[str] = set()
+
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        url = result.get("url")
+        title = result.get("title")
+        content = result.get("content")
+        if not all(isinstance(value, str) and value.strip() for value in (url, title, content)):
+            continue
+        normalized_url = _normalized_result_url(url)
+        if not normalized_url:
+            continue
+        parsed = urlsplit(normalized_url)
+        hostname = (parsed.hostname or "").lower().removeprefix("www.")
+        if (
+            not hostname
+            or hostname == analyzed_host
+            or hostname.endswith(f".{analyzed_host}")
+            or _host_is_under(hostname, SOCIAL_MEDIA_DOMAINS)
+            or _is_editorial_result(title, normalized_url, hostname)
+        ):
+            continue
+
+        name = _competitor_name_from_result(title, hostname)
+        name_key = re.sub(r"[^a-z0-9]+", "", name.lower())
+        if not name_key or name_key == analyzed_name or name_key in seen_names:
+            continue
+        content_text = re.sub(r"\s+", " ", content).strip()[:MAX_SNIPPET_CHARACTERS]
+        sentences = re.split(r"(?<=[.!?])\s+", content_text)
+        description = " ".join(sentences[:2]).strip()[:500] or content_text[:500]
+        offering_sentences = [
+            sentence.strip()
+            for sentence in sentences
+            if re.search(
+                r"\b(offer|provides?|speciali[sz]es?|products?|services?)\b",
+                sentence,
+                re.IGNORECASE,
+            )
+        ]
+        products_services = [sentence[:200] for sentence in offering_sentences[:3]]
+        candidate = {
+            "name": name,
+            "website": f"{parsed.scheme}://{parsed.netloc}",
+            "description": description,
+            "products_services": products_services,
+            "similarity": (
+                f"Identified from the {result.get('query', 'competitor discovery')} "
+                f"search in the {business_category or 'related'} market."
+            ),
+            "source_url": normalized_url,
+        }
+        existing = candidates_by_host.get(hostname)
+        if existing is None or len(candidate["description"]) > len(existing["description"]):
+            candidates_by_host[hostname] = candidate
+            seen_names.add(name_key)
+
+    candidates = list(candidates_by_host.values())
+    logger.info(
+        "[COMPETITOR] Extracted %s potential competitors",
+        len(candidates),
+    )
+    return candidates
 
 
 def _normalized_result_url(url: str) -> str | None:
@@ -276,7 +477,20 @@ async def search_competitor_discovery(
     url: str,
     analyzed_company: str,
     business_category: str = "",
+    products_and_services: list[str] | None = None,
+    target_audience: str = "",
+    repair_attempt: int = 0,
 ) -> dict[str, Any]:
+    company = analyzed_company.strip()[:120] or _company_name_from_url(url, {})
+    category = business_category.strip()[:120]
+    queries = build_competitor_search_queries(
+        company,
+        category,
+        products_and_services,
+        target_audience,
+        repair_attempt,
+    )
+    logger.info("[COMPETITOR] Generated queries: %s", queries)
     if not TAVILY_API_KEY:
         return {
             "success": False,
@@ -284,19 +498,14 @@ async def search_competitor_discovery(
             "error": "Tavily search is not configured.",
         }
 
-    company = analyzed_company.strip()[:120] or _company_name_from_url(url, {})
-    category = business_category.strip()[:120]
-    queries = [
-        f"{company} competitors",
-        f"{category + ' alternatives' if category else company + ' alternatives'}",
-    ]
     results, errors = await _search_queries(
         queries,
         max_results_per_query=3,
-        result_limit=6,
+        result_limit=MAX_COMPETITOR_DISCOVERY_RESULTS,
         requested_url=url,
         preferred_names={query: company for query in queries},
     )
+    logger.info("[COMPETITOR] Tavily returned %s results", len(results))
     if not results:
         return {
             "success": False,

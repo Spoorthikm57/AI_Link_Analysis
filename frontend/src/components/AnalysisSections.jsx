@@ -97,13 +97,21 @@ export function Overview({ website, extracted, business, sources }) {
   );
 }
 
-export function Competitors({ competitors }) {
+export function Competitors({ competitors, status, message }) {
   const items = Array.isArray(competitors)
     ? competitors.filter((item) => item && typeof item === "object" && !Array.isArray(item))
     : [];
+  const analysisStatus = status || (items.length >= 3 ? "complete" : "insufficient_search_results");
+  const statusMessage = message || {
+    incomplete: "Search results included fewer than three reliable competitors.",
+    search_failed: "Competitor search failed. Please try the analysis again later.",
+    analysis_failed: "Competitors were found, but their comparison could not be generated.",
+    insufficient_search_results: "We could not identify reliable competitors from the available search results.",
+  }[analysisStatus] || "";
   return (
     <section className="content-card">
-      <div className="section-heading"><div><p className="eyebrow">Market landscape</p><h2>Competitor analysis</h2><p className="section-description">A comparison of other businesses serving a similar space.</p></div><span className="count-pill">{items.length} found</span></div>
+      <div className="section-heading"><div><p className="eyebrow">Market landscape</p><h2>Competitor analysis</h2><p className="section-description">A comparison of other businesses serving a similar space.</p></div><span className="count-pill">{items.length ? `${items.length} found` : "Unavailable"}</span></div>
+      {analysisStatus !== "complete" && statusMessage && <p className="muted-copy" role="status">{statusMessage}</p>}
       {items.length ? <div className="card-grid">{items.map((item, index) => {
         let safeUrl = "";
         try {
@@ -117,12 +125,12 @@ export function Competitors({ competitors }) {
             {safeUrl ? <a className="external-link" href={safeUrl} target="_blank" rel="noreferrer">{item?.competitor_website} <span aria-hidden="true">↗</span></a> : <p className="muted-copy">{item?.competitor_website || "Website not provided"}</p>}
             <p className="card-description">{item?.description || "Description was not provided."}</p>
             <div className="subsection-block"><p className="detail-label">Products and services</p><ListItems items={item?.products_and_services} emptyText="No products or services provided." /></div>
-            <div className="subsection-block"><p className="detail-label">Strengths</p><ListItems items={item?.strengths} emptyText="No strengths provided." /></div>
+            <div className="subsection-block"><p className="detail-label">Competitive advantages</p><ListItems items={item?.competitive_advantages?.length ? item.competitive_advantages : item?.strengths} emptyText="No competitive advantages provided." /></div>
             <div className="subsection-block"><p className="detail-label">Weaknesses</p><ListItems items={item?.weaknesses} emptyText="No weaknesses provided." /></div>
             <p className="card-description">{item?.comparison_with_analyzed_business || "Comparison details were not provided."}</p>
           </article>
         );
-      })}</div> : <EmptyState>No competitors were returned in this analysis.</EmptyState>}
+      })}</div> : <EmptyState>{statusMessage || "Competitor analysis is unavailable."}</EmptyState>}
     </section>
   );
 }
