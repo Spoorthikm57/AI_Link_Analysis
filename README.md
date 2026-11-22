@@ -77,9 +77,11 @@ npm install
 npm run dev
 ```
 
-Open <http://localhost:5173>. Keep the FastAPI server running in the first terminal at <http://127.0.0.1:8000>; the frontend sends a JSON `POST` request to `/link-analysis` there. The optional `VITE_API_URL` environment variable can override the API base URL (for example, `http://127.0.0.1:8000`).
+Open <http://localhost:5173>. Keep the FastAPI server running in the first terminal at <http://127.0.0.1:8000>; the frontend sends a JSON `POST` request to `/link-analysis` there. The optional `VITE_API_URL` environment variable can override the API base URL (for example, `http://127.0.0.1:8000`). It should be the backend origin, not a path ending in `/link-analysis`; the frontend adds that endpoint automatically.
 
-FastAPI allows cross-origin requests from `http://localhost:5173` and `http://127.0.0.1:5173` for local development. If you change Vite's port or deploy the frontend elsewhere, add its exact origin to `allow_origins` in `app/main.py` and restart FastAPI.
+FastAPI allows cross-origin requests from `http://localhost:5173`, `http://127.0.0.1:5173`, and the deployed frontend at `https://ai-link-analysis-frontend.onrender.com`. If you change Vite's port or deploy the frontend elsewhere, add its exact origin to `allow_origins` in `app/main.py` and redeploy the backend.
+
+For Render, set the frontend service's build-time environment variable `VITE_API_URL` to `https://ai-link-analysis-tb3p.onrender.com`. Set `GROQ_API_KEY` and (if search is enabled) `TAVILY_API_KEY` on the backend service only. The backend health check is available at `/health`.
 
 The dashboard uses the API response directly: website title and description come from `extracted_data`; provenance and search result references come from `sources`; the business overview, competitor analysis, search queries, SEO, products and services, audience, and SWOT sections come from `analysis`. Use the dashboard navigation to switch sections, or download/copy the complete response.
 

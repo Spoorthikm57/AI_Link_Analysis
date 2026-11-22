@@ -5,8 +5,13 @@ import Header from "./components/Header.jsx";
 import Loading from "./components/Loading.jsx";
 import URLInput from "./components/URLInput.jsx";
 
-const API_BASE_URL = (import.meta.env.VITE_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
-const API_URL = `${API_BASE_URL}/link-analysis`;
+const DEFAULT_API_BASE_URL = import.meta.env.DEV ? "http://127.0.0.1:8000" : "";
+const API_BASE_URL = (import.meta.env.VITE_API_URL || DEFAULT_API_BASE_URL)
+  .trim()
+  .replace(/\/+$/, "")
+  .replace(/\/link-analysis$/i, "");
+const API_URL = API_BASE_URL ? `${API_BASE_URL}/link-analysis` : "";
+const API_TIMEOUT_MS = 600_000;
 
 function getApiError(payload, status) {
   if (typeof payload?.detail === "string" && payload.detail.trim()) return payload.detail;
@@ -51,23 +56,38 @@ export default function App() {
   async function analyzeWebsite(url) {
     setError("");
     setResult(null);
+
+    if (!API_URL) {
+      setError("The analysis API is not configured. Set VITE_API_URL to the backend base URL in the frontend deployment settings.");
+      return;
+    }
+
     setLoadingUrl(url);
 
     try {
       let response;
+      let responseText;
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
       try {
         response = await fetch(API_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url }),
+          signal: controller.signal,
         });
-      } catch {
+        responseText = await response.text();
+      } catch (requestError) {
+        if (requestError?.name === "AbortError") {
+          throw new Error("The analysis request timed out. Please try again.");
+        }
         throw new Error(
-          "Could not connect to the analysis service. Please try again in a moment."
+          `Could not connect to the analysis service at ${API_BASE_URL}. Check that the backend is available and allows this frontend origin.`
         );
+      } finally {
+        window.clearTimeout(timeoutId);
       }
 
-      const responseText = await response.text();
       let payload;
       try {
         payload = responseText ? JSON.parse(responseText) : null;

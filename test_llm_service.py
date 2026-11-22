@@ -353,6 +353,36 @@ class AnalysisEndpointTests(unittest.IsolatedAsyncioTestCase):
             "http://localhost:5173",
         )
 
+    async def test_allows_deployed_frontend_origin(self) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=main.app),
+            base_url="http://test",
+        ) as client:
+            response = await client.options(
+                "/link-analysis",
+                headers={
+                    "Origin": "https://ai-link-analysis-frontend.onrender.com",
+                    "Access-Control-Request-Method": "POST",
+                    "Access-Control-Request-Headers": "content-type",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.headers["access-control-allow-origin"],
+            "https://ai-link-analysis-frontend.onrender.com",
+        )
+
+    async def test_health_endpoint_returns_ok(self) -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=main.app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ok"})
+
     async def test_returns_structured_analysis_and_rejects_invalid_url(self) -> None:
         website_data = {
             "success": True,
